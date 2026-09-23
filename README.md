@@ -32,8 +32,12 @@ Tip: on iPhone, Safari → Share → **Add to Home Screen** makes it open like a
 
 Without sync, data stays in the browser it was logged in (localStorage). To share data between phones and browsers:
 
-1. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) with
-   access to **only this repo** and the permission **Contents: Read and write**.
+1. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
+   - **Repository access:** choose **Only select repositories** and pick this repo.
+   - **Permissions:** under **Repository permissions**, click **Add permissions** and select **Contents**. Then change
+     its **Access** from **Read-only** to **Read and write**. GitHub adds **Metadata: Read-only** automatically.
+     Don't add any other permissions.
+   - Set an expiration and click **Generate token**.
 2. Open the app → ⚙️ → paste the token → Save. The header should show **✓ synced**.
 3. Repeat on each device.
 
