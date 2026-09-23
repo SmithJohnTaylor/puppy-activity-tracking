@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f1ea">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Puppy Log</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐶</text></svg>">
+<style>
+  :root {
+    --bg: #f6f1ea; --card: #fff; --ink: #2b2420; --muted: #8a7f76; --line: #e7ddd2;
+    --accent: #c86b3c; --ok: #3f8f5a; --warn: #c9a227; --bad: #c0443a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1816; --card: #26221f; --ink: #f1e9e1; --muted: #a0958b; --line: #3a342f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom)); }
+  main { max-width: 640px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 16px 0 8px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 24px 0 8px; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  .icon-btn { background: none; border: 0; font-size: 22px; padding: 6px; }
+  #sync { font-size: 12px; color: var(--muted); margin-right: 4px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+  .act { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px 12px;
+    text-align: left; display: flex; flex-direction: column; gap: 2px; min-height: 96px;
+    border-left: 5px solid var(--line); transition: transform .08s; }
+  .act:active { transform: scale(.97); }
+  .act .emoji { font-size: 28px; }
+  .act .name { font-weight: 600; }
+  .act .ago { font-size: 13px; color: var(--muted); }
+  .act.fresh { border-left-color: var(--ok); }
+  .act.mid { border-left-color: var(--warn); }
+  .act.stale { border-left-color: var(--bad); }
+  .act.flash { background: color-mix(in srgb, var(--ok) 18%, var(--card)); }
+
+  .filters { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+  .chip { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 4px 10px;
+    font-size: 13px; white-space: nowrap; }
+  .chip.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+  .day { font-weight: 600; margin: 18px 0 6px; font-size: 14px; }
+  .tl { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); }
+  .tl li { position: relative; padding: 6px 0 6px 10px; display: flex; gap: 10px; align-items: baseline; cursor: pointer; }
+  .tl li::before { content: ""; position: absolute; left: -20px; top: 14px; width: 10px; height: 10px;
+    border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
+  .tl .t { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 14px; min-width: 64px; }
+  .tl .n { color: var(--muted); font-size: 14px; }
+  .tl .gap { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
+  .empty { color: var(--muted); padding: 12px 0; }
+
+  dialog { border: 0; border-radius: 16px; background: var(--card); color: var(--ink); width: min(420px, 92vw); padding: 20px; }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog h3 { margin: 0 0 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input, select, textarea { width: 100%; font: inherit; padding: 8px 10px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  .row { display: flex; gap: 8px; margin-top: 16px; }
+  .row button { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
+  .row .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .row .danger { color: var(--bad); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  #toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+    background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 12px; display: none;
+    gap: 14px; align-items: center; box-shadow: 0 4px 20px rgba(0,0,0,.2); max-width: 92vw; }
+  #toast button { background: none; border: 0; color: var(--accent); font-weight: 700; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">🐶 Puppy Log</h1>
+    <div><span id="sync"></span><button class="icon-btn" id="settingsBtn" aria-label="Settings">⚙️</button></div>
+  </header>
+
+  <h2>Tap to log</h2>
+  <div class="grid" id="grid"></div>
+
+  <h2>Timeline</h2>
+  <div class="filters" id="filters"></div>
+  <div id="timeline"></div>
+</main>
+
+<div id="toast"><span id="toastMsg"></span><button id="toastUndo">Undo</button><button id="toastEdit">Edit</button></div>
+
+<dialog id="editDlg">
+  <form method="dialog" id="editForm">
+    <h3>Edit entry</h3>
+    <label for="eType">Activity</label>
+    <select id="eType"></select>
+    <label for="eTime">When</label>
+    <input type="datetime-local" id="eTime" required>
+    <label for="eNote">Note</label>
+    <input id="eNote" placeholder="optional">
+    <div class="row">
+      <button type="button" class="danger" id="eDelete">Delete</button>
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button value="save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="setDlg">
+  <form method="dialog" id="setForm">
+    <h3>Settings</h3>
+    <label for="sName">Puppy's name</label>
+    <input id="sName" placeholder="Puppy">
+    <label for="sRepo">GitHub repo (owner/name)</label>
+    <input id="sRepo" placeholder="owner/repo">
+    <label for="sToken">GitHub token</label>
+    <input id="sToken" type="password" autocomplete="off" placeholder="github_pat_…">
+    <div class="hint">Fine-grained token, this repo only, <b>Contents: Read and write</b>. Stored only in this browser.
+      Data is saved to <code>events.json</code> on the <code>data</code> branch. Leave blank to keep data on this device only.</div>
+    <div class="row">
+      <button type="button" id="sExport">Export JSON</button>
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button value="save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const ACTIVITIES = [
+  { id: "pee",      name: "Pee",      emoji: "💦", warnMin: 60,  staleMin: 120 },
+  { id: "poop",     name: "Poop",     emoji: "💩", warnMin: 240, staleMin: 480 },
+  { id: "eat",      name: "Eat",      emoji: "🍖", warnMin: 300, staleMin: 480 },
+  { id: "drink",    name: "Drink",    emoji: "💧", warnMin: 120, staleMin: 240 },
+  { id: "sleep",    name: "Nap",      emoji: "😴", warnMin: 180, staleMin: 360 },
+  { id: "walk",     name: "Walk",     emoji: "🦮", warnMin: 240, staleMin: 480 },
+  { id: "play",     name: "Play",     emoji: "🎾", warnMin: 240, staleMin: 480 },
+  { id: "train",    name: "Training", emoji: "🎓", warnMin: 720, staleMin: 1440 },
+  { id: "accident", name: "Accident", emoji: "🚨", warnMin: null, staleMin: null },
+];
+const ACT = Object.fromEntries(ACTIVITIES.map(a => [a.id, a]));
+const LS = { data: "puppylog.data", cfg: "puppylog.cfg" };
+const DATA_BRANCH = "data", DATA_PATH = "events.json";
+
+// ---------- state ----------
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+let data = load(LS.data, { events: [], deleted: [] });
+let cfg = load(LS.cfg, {});
+if (!cfg.repo && location.hostname.endsWith(".github.io")) {
+  const owner = location.hostname.split(".")[0];
+  const repo = location.pathname.split("/").filter(Boolean)[0] || `${owner}.github.io`;
+  cfg.repo = `${owner}/${repo}`;
+}
+let filter = "all";
+const save = () => { try { localStorage.setItem(LS.data, JSON.stringify(data)); } catch {} };
+const saveCfg = () => { try { localStorage.setItem(LS.cfg, JSON.stringify(cfg)); } catch {} };
+
+function merge(a, b) {
+  const deleted = [...new Set([...(a.deleted || []), ...(b.deleted || [])])];
+  const del = new Set(deleted), byId = new Map();
+  for (const e of [...(a.events || []), ...(b.events || [])]) {
+    if (del.has(e.id)) continue;
+    const cur = byId.get(e.id);
+    if (!cur || (e.updated || 0) > (cur.updated || 0)) byId.set(e.id, e);
+  }
+  return { events: [...byId.values()].sort((x, y) => y.ts - x.ts), deleted };
+}
+
+function addEvent(type, ts = Date.now()) {
+  const e = { id: crypto.randomUUID(), type, ts, note: "", updated: Date.now() };
+  data.events.unshift(e);
+  data.events.sort((x, y) => y.ts - x.ts);
+  commit();
+  return e;
+}
+function updateEvent(id, patch) {
+  const e = data.events.find(x => x.id === id);
+  if (!e) return;
+  Object.assign(e, patch, { updated: Date.now() });
+  data.events.sort((x, y) => y.ts - x.ts);
+  commit();
+}
+function deleteEvent(id) {
+  data.events = data.events.filter(x => x.id !== id);
+  data.deleted.push(id);
+  commit();
+}
+function commit() { save(); render(); schedulePush(); }
+
+// ---------- formatting ----------
+function ago(ms) {
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h ago`;
+}
+function dur(ms) {
+  const m = Math.round(ms / 60000);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+const fmtTime = ts => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function fmtDay(ts) {
+  const d = new Date(ts), t = new Date(); t.setHours(0, 0, 0, 0);
+  const diff = Math.round((t - new Date(d).setHours(0, 0, 0, 0)) / 864e5);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+function toLocalInput(ts) {
+  const d = new Date(ts); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// ---------- render ----------
+const $ = id => document.getElementById(id);
+
+function render() {
+  const now = Date.now();
+  $("title").textContent = `🐶 ${cfg.name || "Puppy"} Log`;
+  document.title = `${cfg.name || "Puppy"} Log`;
+
+  const last = {};
+  for (const e of data.events) if (!(e.type in last)) last[e.type] = e.ts;
+
+  $("grid").innerHTML = ACTIVITIES.map(a => {
+    const t = last[a.id];
+    let cls = "";
+    if (t && a.warnMin) {
+      const min = (now - t) / 60000;
+      cls = min < a.warnMin ? "fresh" : min < a.staleMin ? "mid" : "stale";
+    }
+    return `<button class="act ${cls}" data-type="${a.id}">
+      <span class="emoji">${a.emoji}</span><span class="name">${a.name}</span>
+      <span class="ago">${t ? `${ago(now - t)} · ${fmtTime(t)}` : "never"}</span></button>`;
+  }).join("");
+
+  $("filters").innerHTML = [{ id: "all", name: "All", emoji: "" }, ...ACTIVITIES].map(a =>
+    `<button class="chip ${filter === a.id ? "on" : ""}" data-filter="${a.id}">${a.emoji} ${a.name}</button>`).join("");
+
+  const events = data.events.filter(e => filter === "all" || e.type === filter).slice(0, 500);
+  if (!events.length) { $("timeline").innerHTML = `<div class="empty">Nothing logged yet.</div>`; return; }
+
+  // "since previous" gap shown only when filtered to one activity
+  let html = "", day = null;
+  events.forEach((e, i) => {
+    const d = fmtDay(e.ts);
+    if (d !== day) { if (day) html += "</ul>"; html += `<div class="day">${d}</div><ul class="tl">`; day = d; }
+    const a = ACT[e.type] || { emoji: "❓", name: e.type };
+    const prev = events[i + 1];
+    const gap = filter !== "all" && prev ? `<span class="gap">+${dur(e.ts - prev.ts)}</span>` : "";
+    html += `<li data-id="${e.id}"><span class="t">${fmtTime(e.ts)}</span>
+      <span>${a.emoji} ${a.name}${e.note ? ` <span class="n">— ${esc(e.note)}</span>` : ""}</span>${gap}</li>`;
+  });
+  $("timeline").innerHTML = html + "</ul>";
+}
+
+// ---------- interactions ----------
+let toastTimer, lastAdded;
+function toast(msg, ev) {
+  lastAdded = ev;
+  $("toastMsg").textContent = msg;
+  $("toastUndo").style.display = $("toastEdit").style.display = ev ? "" : "none";
+  $("toast").style.display = "flex";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").style.display = "none", 5000);
+}
+
+$("grid").addEventListener("click", ev => {
+  const b = ev.target.closest(".act"); if (!b) return;
+  const a = ACT[b.dataset.type];
+  const e = addEvent(a.id);
+  navigator.vibrate?.(30);
+  toast(`${a.emoji} ${a.name} logged at ${fmtTime(e.ts)}`, e);
+  const nb = document.querySelector(`.act[data-type="${a.id}"]`);
+  nb?.classList.add("flash"); setTimeout(() => nb?.classList.remove("flash"), 400);
+});
+$("toastUndo").onclick = () => { if (lastAdded) deleteEvent(lastAdded.id); $("toast").style.display = "none"; };
+$("toastEdit").onclick = () => { if (lastAdded) openEdit(lastAdded.id); $("toast").style.display = "none"; };
+
+$("filters").addEventListener("click", ev => {
+  const c = ev.target.closest(".chip"); if (!c) return;
+  filter = c.dataset.filter; render();
+});
+$("timeline").addEventListener("click", ev => {
+  const li = ev.target.closest("li[data-id]"); if (li) openEdit(li.dataset.id);
+});
+
+$("eType").innerHTML = ACTIVITIES.map(a => `<option value="${a.id}">${a.emoji} ${a.name}</option>`).join("");
+let editing = null;
+function openEdit(id) {
+  const e = data.events.find(x => x.id === id); if (!e) return;
+  editing = id;
+  $("eType").value = e.type; $("eTime").value = toLocalInput(e.ts); $("eNote").value = e.note || "";
+  $("editDlg").showModal();
+}
+$("editDlg").addEventListener("close", () => {
+  if ($("editDlg").returnValue === "save" && editing) {
+    updateEvent(editing, { type: $("eType").value, ts: new Date($("eTime").value).getTime(), note: $("eNote").value.trim() });
+  }
+  editing = null;
+});
+$("eDelete").onclick = () => { if (editing) deleteEvent(editing); editing = null; $("editDlg").close("delete"); };
+
+$("settingsBtn").onclick = () => {
+  $("sName").value = cfg.name || ""; $("sRepo").value = cfg.repo || ""; $("sToken").value = cfg.token || "";
+  $("setDlg").showModal();
+};
+$("setDlg").addEventListener("close", () => {
+  if ($("setDlg").returnValue !== "save") return;
+  cfg.name = $("sName").value.trim(); cfg.repo = $("sRepo").value.trim(); cfg.token = $("sToken").value.trim();
+  saveCfg(); render(); sync();
+});
+$("sExport").onclick = () => {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  const a = document.createElement("a"); a.href = url; a.download = "puppy-log.json"; a.click();
+  URL.revokeObjectURL(url);
+};
+
+// ---------- GitHub sync ----------
+const b64enc = s => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+const b64dec = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), c => c.charCodeAt(0)));
+const canSync = () => cfg.token && cfg.repo;
+function setStatus(s) { $("sync").textContent = s; }
+
+async function gh(path, opts = {}) {
+  const r = await fetch(`https://api.github.com/repos/${cfg.repo}${path}`, {
+    cache: "no-store", ...opts,
+    headers: { Authorization: `Bearer ${cfg.token}`, Accept: "application/vnd.github+json", ...(opts.headers || {}) },
+  });
+  const missingOk = r.status === 404 && (!opts.method || opts.method === "GET");
+  if (!r.ok && !missingOk) throw Object.assign(new Error(`GitHub ${r.status}`), { status: r.status });
+  return missingOk ? null : r.json();
+}
+
+async function pull() {
+  const f = await gh(`/contents/${DATA_PATH}?ref=${DATA_BRANCH}`);
+  if (!f) return { sha: null, remote: { events: [], deleted: [] } };
+  return { sha: f.sha, remote: JSON.parse(b64dec(f.content)) };
+}
+
+let syncing = false, dirty = false, pushTimer;
+function schedulePush() { dirty = true; clearTimeout(pushTimer); pushTimer = setTimeout(sync, 800); }
+
+async function sync() {
+  if (!canSync()) { setStatus(cfg.token ? "" : "local only"); return; }
+  if (syncing) { pushTimer = setTimeout(sync, 1500); return; }
+  syncing = true; setStatus("syncing…");
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { sha, remote } = await pull();
+      const merged = merge(data, remote);
+      const changed = JSON.stringify(merged) !== JSON.stringify(merge(remote, { events: [], deleted: [] }));
+      data = merged; save(); render();
+      if (!changed) { dirty = false; break; }
+      try {
+        await gh(`/contents/${DATA_PATH}`, { method: "PUT", body: JSON.stringify({
+          message: `log: ${new Date().toISOString()}`, branch: DATA_BRANCH,
+          content: b64enc(JSON.stringify(merged, null, 1)), ...(sha ? { sha } : {}),
+        }) });
+        dirty = false; break;
+      } catch (err) { if (err.status !== 409 && err.status !== 422) throw err; } // stale sha → retry
+    }
+    setStatus("✓ synced");
+  } catch (err) {
+    console.error(err); setStatus(err.status === 401 ? "⚠ bad token" : "⚠ offline");
+  } finally { syncing = false; }
+}
+
+render();
+sync();
+setInterval(render, 30000);
+setInterval(() => { if (!document.hidden) sync(); }, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { render(); sync(); } });
+</script>
+</body>
+</html>
