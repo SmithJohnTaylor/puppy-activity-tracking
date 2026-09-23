@@ -23,7 +23,7 @@
   header { display: flex; align-items: center; justify-content: space-between; padding: 16px 0 8px; }
   h1 { font-size: 22px; margin: 0; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 24px 0 8px; }
-  button { font: inherit; color: inherit; cursor: pointer; }
+  button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
   .icon-btn { background: none; border: 0; font-size: 22px; padding: 6px; }
   #sync { font-size: 12px; color: var(--muted); margin-right: 4px; }
 
@@ -69,11 +69,15 @@
   .row button { flex: 1; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
   .row .primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .row .danger { color: var(--bad); }
+  .check { display: flex; gap: 8px; align-items: center; color: var(--ink); font-size: 15px; margin-top: 12px; }
+  .check input { width: auto; margin: 0; }
+  .acc { color: var(--bad); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  #accDlg .big button { font-size: 18px; padding: 18px 8px; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
 
   #toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
     background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 12px; display: none;
-    gap: 14px; align-items: center; box-shadow: 0 4px 20px rgba(0,0,0,.2); max-width: 92vw; }
+    gap: 14px; align-items: center; box-shadow: 0 4px 20px rgba(0,0,0,.2); width: max-content; max-width: 92vw; }
   #toast button { background: none; border: 0; color: var(--accent); font-weight: 700; }
 </style>
 </head>
@@ -99,6 +103,7 @@
     <h3 id="eTitle">Edit entry</h3>
     <label for="eType">Activity</label>
     <select id="eType"></select>
+    <label class="check" id="eAccRow"><input type="checkbox" id="eAcc"> 🚨 Accident (inside)</label>
     <label for="eTime">When</label>
     <input type="datetime-local" id="eTime" required>
     <div class="quick" id="eQuick">
@@ -115,6 +120,18 @@
       <button value="cancel" formnovalidate>Cancel</button>
       <button value="save" class="primary">Save</button>
     </div>
+  </form>
+</dialog>
+
+<dialog id="accDlg">
+  <form method="dialog">
+    <h3>🚨 Accident — what was it?</h3>
+    <div class="row big">
+      <button value="pee">💦 Pee</button>
+      <button value="poop">💩 Poop</button>
+      <button value="both">Both</button>
+    </div>
+    <div class="row"><button value="cancel">Cancel</button></div>
   </form>
 </dialog>
 
@@ -177,8 +194,12 @@ function merge(a, b) {
   return { events: [...byId.values()].sort((x, y) => y.ts - x.ts), deleted };
 }
 
-function addEvent(type, ts = Date.now(), note = "") {
-  const e = { id: crypto.randomUUID(), type, ts, note, updated: Date.now() };
+// accidents are pee/poop entries flagged `accident: true` (type "accident" = legacy entries)
+const isAccident = e => e.accident || e.type === "accident";
+const canBeAccident = type => type === "pee" || type === "poop";
+
+function addEvent(type, ts = Date.now(), note = "", extra = {}) {
+  const e = { id: crypto.randomUUID(), type, ts, note, ...extra, updated: Date.now() };
   data.events.unshift(e);
   data.events.sort((x, y) => y.ts - x.ts);
   commit();
@@ -235,7 +256,10 @@ function render() {
   document.title = `${cfg.name || "Puppy"} Log`;
 
   const last = {};
-  for (const e of data.events) if (!(e.type in last)) last[e.type] = e.ts;
+  for (const e of data.events) {
+    if (!(e.type in last)) last[e.type] = e.ts;
+    if (isAccident(e) && !("accident" in last)) last.accident = e.ts;
+  }
 
   $("grid").innerHTML = ACTIVITIES.map(a => {
     const t = last[a.id];
@@ -252,7 +276,7 @@ function render() {
   $("filters").innerHTML = [{ id: "all", name: "All", emoji: "" }, ...ACTIVITIES].map(a =>
     `<button class="chip ${filter === a.id ? "on" : ""}" data-filter="${a.id}">${a.emoji} ${a.name}</button>`).join("");
 
-  const events = data.events.filter(e => filter === "all" || e.type === filter).slice(0, 500);
+  const events = data.events.filter(e => filter === "all" || (filter === "accident" ? isAccident(e) : e.type === filter)).slice(0, 500);
   if (!events.length) { $("timeline").innerHTML = `<div class="empty">Nothing logged yet.</div>`; return; }
 
   // "since previous" gap shown only when filtered to one activity
@@ -264,17 +288,18 @@ function render() {
     const prev = events[i + 1];
     const gap = filter !== "all" && prev ? `<span class="gap">+${dur(e.ts - prev.ts)}</span>` : "";
     html += `<li data-id="${e.id}"><span class="t">${fmtTime(e.ts)}</span>
-      <span>${a.emoji} ${a.name}${e.note ? ` <span class="n">— ${esc(e.note)}</span>` : ""}</span>${gap}</li>`;
+      <span>${a.emoji} ${a.name}${e.accident ? ` <span class="acc">🚨 accident</span>` : ""}${e.note ? ` <span class="n">— ${esc(e.note)}</span>` : ""}</span>${gap}</li>`;
   });
   $("timeline").innerHTML = html + "</ul>";
 }
 
 // ---------- interactions ----------
-let toastTimer, lastAdded;
-function toast(msg, ev) {
-  lastAdded = ev;
+let toastTimer, lastAdded = [];
+function toast(msg, evs) {
+  lastAdded = [].concat(evs || []);
   $("toastMsg").textContent = msg;
-  $("toastUndo").style.display = $("toastEdit").style.display = ev ? "" : "none";
+  $("toastUndo").style.display = lastAdded.length ? "" : "none";
+  $("toastEdit").style.display = lastAdded.length === 1 ? "" : "none";
   $("toast").style.display = "flex";
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => $("toast").style.display = "none", 5000);
@@ -298,14 +323,25 @@ $("grid").addEventListener("click", ev => {
   const b = ev.target.closest(".act"); if (!b) return;
   if (longPressed) { longPressed = false; return; }
   const a = ACT[b.dataset.type];
+  if (a.id === "accident") { accidentTs = Date.now(); $("accDlg").returnValue = ""; $("accDlg").showModal(); return; }
   const e = addEvent(a.id);
   navigator.vibrate?.(30);
   toast(`${a.emoji} ${a.name} logged at ${fmtTime(e.ts)}`, e);
   const nb = document.querySelector(`.act[data-type="${a.id}"]`);
   nb?.classList.add("flash"); setTimeout(() => nb?.classList.remove("flash"), 400);
 });
-$("toastUndo").onclick = () => { if (lastAdded) deleteEvent(lastAdded.id); $("toast").style.display = "none"; };
-$("toastEdit").onclick = () => { if (lastAdded) openEdit(lastAdded.id); $("toast").style.display = "none"; };
+$("toastUndo").onclick = () => { lastAdded.forEach(e => deleteEvent(e.id)); $("toast").style.display = "none"; };
+$("toastEdit").onclick = () => { if (lastAdded[0]) openEdit(lastAdded[0].id); $("toast").style.display = "none"; };
+
+let accidentTs;
+$("accDlg").addEventListener("close", () => {
+  const v = $("accDlg").returnValue;
+  const types = v === "both" ? ["pee", "poop"] : canBeAccident(v) ? [v] : [];
+  if (!types.length) return;
+  const evs = types.map(t => addEvent(t, accidentTs, "", { accident: true }));
+  navigator.vibrate?.(30);
+  toast(`🚨 ${types.map(t => ACT[t].name).join(" + ")} accident logged at ${fmtTime(accidentTs)}`, evs);
+});
 
 $("filters").addEventListener("click", ev => {
   const c = ev.target.closest(".chip"); if (!c) return;
@@ -315,11 +351,15 @@ $("timeline").addEventListener("click", ev => {
   const li = ev.target.closest("li[data-id]"); if (li) openEdit(li.dataset.id);
 });
 
-$("eType").innerHTML = ACTIVITIES.map(a => `<option value="${a.id}">${a.emoji} ${a.name}</option>`).join("");
 let editing = null; // event id, or "new" when logging a past entry
-function showEntryDlg(title, type, ts, note, canDelete) {
+const syncAccRow = () => { $("eAccRow").style.display = canBeAccident($("eType").value) ? "" : "none"; };
+$("eType").addEventListener("change", syncAccRow);
+function showEntryDlg(title, type, ts, note, canDelete, accident = false) {
+  // "accident" is only a choice when editing a legacy accident entry
+  $("eType").innerHTML = ACTIVITIES.filter(a => a.id !== "accident" || type === "accident")
+    .map(a => `<option value="${a.id}">${a.emoji} ${a.name}</option>`).join("");
   $("eTitle").textContent = title;
-  $("eType").value = type; $("eTime").value = toLocalInput(ts); $("eNote").value = note;
+  $("eType").value = type; $("eAcc").checked = accident; syncAccRow(); $("eTime").value = toLocalInput(ts); $("eNote").value = note;
   $("eTime").max = toLocalInput(Date.now() + 60000);
   $("eDelete").style.display = canDelete ? "" : "none";
   $("editDlg").returnValue = "";
@@ -328,11 +368,12 @@ function showEntryDlg(title, type, ts, note, canDelete) {
 function openEdit(id) {
   const e = data.events.find(x => x.id === id); if (!e) return;
   editing = id;
-  showEntryDlg("Edit entry", e.type, e.ts, e.note || "", true);
+  showEntryDlg("Edit entry", e.type, e.ts, e.note || "", true, !!e.accident);
 }
 function openNew(type = filter !== "all" ? filter : "pee") {
   editing = "new";
-  showEntryDlg("Log earlier", type, Date.now() - 15 * 60000, "", false);
+  const accident = type === "accident";
+  showEntryDlg("Log earlier", accident ? "pee" : type, Date.now() - 15 * 60000, "", false, accident);
 }
 $("addPast").onclick = () => openNew();
 $("eQuick").addEventListener("click", ev => {
@@ -342,10 +383,11 @@ $("eQuick").addEventListener("click", ev => {
 $("editDlg").addEventListener("close", () => {
   if ($("editDlg").returnValue === "save" && editing) {
     const type = $("eType").value, ts = new Date($("eTime").value).getTime(), note = $("eNote").value.trim();
+    const accident = canBeAccident(type) && $("eAcc").checked;
     if (editing === "new") {
-      const e = addEvent(type, ts, note);
-      toast(`${ACT[type].emoji} ${ACT[type].name} logged at ${fmtTime(ts)}`, e);
-    } else updateEvent(editing, { type, ts, note });
+      const e = addEvent(type, ts, note, accident ? { accident } : {});
+      toast(`${accident ? "🚨" : ACT[type].emoji} ${ACT[type].name}${accident ? " accident" : ""} logged at ${fmtTime(ts)}`, e);
+    } else updateEvent(editing, { type, ts, note, accident });
   }
   editing = null;
 });
