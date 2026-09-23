@@ -6,7 +6,7 @@ It shows how long it has been since each activity, and a timeline of everything 
 **Live:** https://smithjohntaylor.github.io/puppy-activity-tracking/
 
 The whole app is one static file (`index.html`) with no framework and no build step. It is hosted on GitHub Pages
-and syncs data across devices by reading and writing a JSON file in this repo through the GitHub API.
+and syncs data across devices by reading and writing a JSON file in a separate private repo through the GitHub API.
 
 ---
 
@@ -32,20 +32,31 @@ Tip: on iPhone, Safari → Share → **Add to Home Screen** makes it open like a
 
 Without sync, data stays in the browser it was logged in (localStorage). To share data between phones and browsers:
 
-1. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
-   - **Repository access:** choose **Only select repositories** and pick this repo.
+1. Create a **private** repo for the data, named `<this repo>-data` (here: `puppy-activity-tracking-data`).
+   Tick **Add a README** so it has a first commit. The app creates the `data` branch and `events.json` itself.
+2. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new):
+   - **Repository access:** choose **Only select repositories** and pick the **data** repo only, not the app repo.
    - **Permissions:** under **Repository permissions**, click **Add permissions** and select **Contents**. Then change
      its **Access** from **Read-only** to **Read and write**. GitHub adds **Metadata: Read-only** automatically.
      Don't add any other permissions.
    - Set an expiration and click **Generate token**.
-2. Open the app → ⚙️ → paste the token → Save. The header should show **✓ synced**.
-3. Repeat on each device.
+3. Open the app → ⚙️ → check the repo field says `owner/<this repo>-data` → paste the token → Save.
+   The header should show **✓ synced**.
+4. Repeat on each device.
 
 **Security:**
-- The token is stored in plain text in each browser's localStorage. Scope it to this repo only.
-- The repo is public (GitHub Pages on a free plan requires that), so anyone can read `events.json` on the `data` branch.
+- The token is stored in plain text in each browser's localStorage. Scope it to the data repo only.
+- Keep the data in its own private repo, not this one. This repo is public (GitHub Pages on a free plan requires
+  that) and Pages deploys from it, so a token with write access here could replace the live app. The data would also
+  be public.
+- localStorage is shared by every page on the same origin. All of one user's Pages sites share
+  `https://<user>.github.io`, so any of them can read the token. Hosting this app on its own origin (e.g. a custom
+  subdomain) prevents that.
+- Synced data is untrusted: the timeline escapes every value from `events.json` before rendering it.
 
-Sync status in the header: `local only` (no token), `syncing…`, `✓ synced`, `⚠ bad token` (401), `⚠ offline`.
+Sync status in the header: `local only` (no token), `syncing…`, `✓ synced`, `⚠ bad token` (401),
+`⚠ repo not found` (404: wrong repo name, or the token can't see it), `⚠ repo empty` (no commits yet),
+`⚠ conflict` (3 retries all hit a newer write; tried again on the next sync), `⚠ offline` (anything else).
 
 ---
 
@@ -62,11 +73,13 @@ README.md
 
 Branches:
 - **`main`**: app code. GitHub Pages serves the repo root of `main`.
-- **`data`**: holds only `events.json`, the synced data. It is separate so that each logged event doesn't trigger a Pages rebuild. Never merge it into `main`.
+- **`data`**: the old home of `events.json`, from before the data moved to the private `-data` repo. Never merge it into `main`.
+
+The private data repo keeps `events.json` on its own `data` branch.
 
 ### Data model
 
-Stored in localStorage under `puppylog.data`, and synced to `events.json`:
+Stored in localStorage under `puppylog.data`, and synced to `events.json` in the data repo:
 
 ```json
 {
@@ -85,15 +98,17 @@ Stored in localStorage under `puppylog.data`, and synced to `events.json`:
 - `deleted` is a list of ids for deleted entries. It stays in the file so that a delete on one device also removes the entry from other devices.
 
 Settings are stored in localStorage under `puppylog.cfg`: `{ name, repo, token }`. On `*.github.io`, `repo` defaults to
-the owner and repo name taken from the URL.
+`<owner>/<repo>-data`, built from the URL. It is never the app repo itself.
 
 ### Sync algorithm (`sync()` in `index.html`)
 
-1. `GET /repos/{repo}/contents/events.json?ref=data`. A 404 means no file yet, which is treated as empty.
+1. `GET /repos/{repo}/contents/events.json?ref=data`. A 404 means no file yet, which is treated as empty. If the
+   `data` branch doesn't exist either, `ensureBranch()` creates it from the default branch.
 2. `merge(local, remote)`: combine events by `id`. If both copies have the same id, the one with the higher `updated`
    is kept. Any id listed in `deleted` from either side is dropped.
 3. If the merged result differs from what's on GitHub, `PUT` it back with the `sha` just read. A 409 or 422
-   (someone else wrote in between) means read and merge again, up to 3 tries.
+   (someone else wrote in between) means read and merge again, up to 3 tries. If all 3 fail, the status shows
+   `⚠ conflict` and the next sync tries again.
 
 Sync runs 800ms after any change (so quick taps are batched), every 60s while the page is visible, and when the tab
 regains focus. Failures never lose local data.
@@ -110,7 +125,7 @@ regains focus. Failures never lose local data.
 | Entry dialog | `showEntryDlg()`, `openEdit(id)`, `openNew(type)`; `editing` is an event id or `"new"` |
 | Long-press | `pointerdown` timer on `#grid` (500ms); `longPressed` stops the tap from also logging |
 | Toast | `toast(msg, evs)`: Undo works on several events, Edit only when there's one |
-| GitHub sync | `gh()`, `pull()`, `sync()`, `schedulePush()`, `merge()` |
+| GitHub sync | `gh()`, `ensureBranch()`, `pull()`, `sync()`, `schedulePush()`, `merge()` |
 
 The page supports dark mode (`prefers-color-scheme`) and uses safe-area insets. It is built for a phone at 375px wide.
 
@@ -132,10 +147,11 @@ npm test
 ```
 
 `tests/e2e.mjs` serves `index.html` from a local server and replaces the GitHub API with an in-memory fake
-(it can simulate 404, 409 conflicts, 401 and offline). It then tests the app in two separate browser contexts
+(it can simulate 404, 409 conflicts, 401, offline, a missing `data` branch and an empty repo). It then tests the app in two separate browser contexts
 acting as two devices. It covers logging, undo, editing, log earlier, long-press, accidents, filters, persistence,
-dark mode, sync between two devices, conflict retry, deletes syncing, bad token and offline recovery.
-Screenshots are written to `tests/screenshots/` (gitignored). The last run: **78 passed, 0 failed**.
+dark mode, sync between two devices, conflict retry, deletes syncing, bad token, offline recovery, escaping of
+untrusted synced data, creating the `data` branch in a new repo, and the error statuses.
+Screenshots are written to `tests/screenshots/` (gitignored). The last run: **91 passed, 0 failed**.
 
 To view the app locally: `python3 -m http.server` in the repo root, then open http://localhost:8000.
 
@@ -163,6 +179,8 @@ non-interactive shells. If `node: command not found` or `_load_nvm` errors appea
 2. **Log earlier**: long-press or ＋ link, quick time buttons, future times rejected.
 3. **Accidents**: stored as pee/poop entries marked `accident: true`, chosen from a Pee/Poop/Both prompt. Also a
    toast width fix and no tap highlight on buttons.
+4. **Security**: synced data moved to a separate private repo, so the token can't change the app. Synced values are
+   escaped before rendering. The app creates the `data` branch if it's missing. Clearer sync error statuses.
 
 Ideas not built yet: GitHub Action to run tests on push, stats (e.g. average time between pees, accidents per day),
 a service worker for offline loading, several dogs.

@@ -15,18 +15,38 @@ let pass = 0, fail = 0;
 const poll = async (fn, ms = 2000) => { const end = Date.now() + ms; let v; while (Date.now() < end) { if ((v = await fn())) return v; await new Promise(r => setTimeout(r, 50)); } return v; };
 const check = (name, cond, extra = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"}  ${name}${extra ? "  — " + extra : ""}`); };
 
-// ---- fake GitHub contents API ----
-const gh = { sha: null, json: null, n: 0, puts: 0, conflicts: 0, forceConflict: false, auths: new Set() };
+// ---- fake GitHub API: contents, plus the branch/ref calls used to create the data branch ----
+const gh = { sha: null, json: null, n: 0, puts: 0, conflicts: 0, forceConflict: false, auths: new Set(),
+  branches: new Set(["main", "data"]), refPosts: 0, noRepo: false, alwaysConflict: false };
 const putRemote = obj => { gh.json = obj; gh.sha = `sha${++gh.n}`; };
 async function mockGitHub(ctx) {
   await ctx.route("https://api.github.com/**", async route => {
     const req = route.request();
     gh.auths.add(req.headers()["authorization"]);
+    const path = new URL(req.url()).pathname.replace(/^\/repos\/[^/]+\/[^/]+/, "");
+    const notFound = () => route.fulfill({ status: 404, json: { message: "Not Found" } });
+    if (gh.noRepo) return notFound();
+    if (req.method() === "GET" && path === "") return route.fulfill({ json: { default_branch: "main" } });
+    if (req.method() === "GET" && path.startsWith("/branches/"))
+      return gh.branches.has(path.slice(10)) ? route.fulfill({ json: { name: path.slice(10) } }) : notFound();
+    if (req.method() === "GET" && path.startsWith("/git/ref/heads/")) {
+      if (!gh.branches.size) return route.fulfill({ status: 409, json: { message: "Git Repository is empty." } });
+      return gh.branches.has(path.slice(15)) ? route.fulfill({ json: { object: { sha: "headsha" } } }) : notFound();
+    }
+    if (req.method() === "POST" && path === "/git/refs") {
+      gh.refPosts++;
+      const b = JSON.parse(req.postData()).ref.replace("refs/heads/", "");
+      if (gh.branches.has(b)) return route.fulfill({ status: 422, json: { message: "Reference already exists" } });
+      gh.branches.add(b);
+      return route.fulfill({ status: 201, json: {} });
+    }
     if (req.method() === "GET") {
-      if (!gh.sha) return route.fulfill({ status: 404, json: { message: "Not Found" } });
+      if (!gh.sha || !gh.branches.has("data")) return notFound();
       return route.fulfill({ json: { sha: gh.sha, content: Buffer.from(JSON.stringify(gh.json)).toString("base64") } });
     }
     const body = JSON.parse(req.postData());
+    if (!gh.branches.has(body.branch)) return notFound();
+    if (gh.alwaysConflict) { gh.conflicts++; return route.fulfill({ status: 409, json: { message: "conflict" } }); }
     if (gh.forceConflict) { // someone else wrote in between
       gh.forceConflict = false;
       putRemote({ ...gh.json, events: [...gh.json.events, { id: "other-device", type: "walk", ts: Date.now() - 1000, note: "", updated: 1 }] });
@@ -333,6 +353,56 @@ await mockGitHub(B.context());
 await B.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
 await settle(B);
 check("back online: offline entry pushed", gh.json.events.some(e => e.type === "play"));
+
+// synced data is untrusted: markup in type/id/note must render as text, and odd types must not crash
+const XSS = `<img src=x onerror="window.__xss=1">`;
+putRemote({ ...gh.json, events: [...gh.json.events,
+  { id: `"><img src=x onerror="window.__xss=1">`, type: XSS, ts: Date.now() - 5000, note: 42, updated: 1 },
+  { id: "proto", type: "__proto__", ts: Date.now() - 6000, note: "", updated: 1 }] });
+await B.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+await settle(B);
+await B.waitForTimeout(300);
+check("remote markup in type/id not executed", !(await B.evaluate(() => window.__xss)) && await B.locator("#timeline img").count() === 0);
+check("unknown remote type shown as text", await B.locator(".tl li", { hasText: XSS }).count() === 1);
+check("__proto__ type rendered as unknown", (await B.locator('.tl li[data-id="proto"]').textContent()).includes("❓ __proto__"));
+await B.locator(".tl li", { hasText: XSS }).tap();
+check("escaped id still opens its entry", await B.locator("#editDlg").isVisible() && (await B.inputValue("#eNote")) === "42");
+await B.click('#editDlg button[value="cancel"]');
+await B.context().close(); await A.context().close();
+
+// ================= new private data repo =================
+// no data branch yet → app branches it off the default branch, then writes
+Object.assign(gh, { sha: null, json: null, puts: 0, refPosts: 0, branches: new Set(["main"]) });
+const C = await device("C", { ...cfg, repo: "me/pup-data" });
+await C.tap('.act[data-type="walk"]');
+await settle(C);
+check("missing data branch created", gh.branches.has("data") && gh.refPosts === 1, `refPosts=${gh.refPosts}`);
+check("first event written to new repo", gh.puts === 1 && gh.json.events.length === 1);
+await C.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+await settle(C);
+check("branch not re-created once file exists", gh.refPosts === 1);
+
+// every retry conflicts → not reported as synced; next sync pushes
+gh.alwaysConflict = true;
+await C.tap('.act[data-type="eat"]');
+check("3 failed retries show '⚠ conflict'", await poll(async () => (await C.textContent("#sync")) === "⚠ conflict", 5000), await C.textContent("#sync"));
+gh.alwaysConflict = false;
+await C.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+await settle(C);
+check("after conflict clears, entry pushed", gh.json.events.some(e => e.type === "eat"));
+await C.context().close();
+
+// repo with no commits → clear status, not "offline"
+Object.assign(gh, { sha: null, json: null, branches: new Set() });
+const D = await device("D", { ...cfg, repo: "me/empty" });
+check("empty repo shows '⚠ repo empty'", await poll(async () => (await D.textContent("#sync")) === "⚠ repo empty"), await D.textContent("#sync"));
+await D.context().close();
+
+// token can't see the repo (e.g. old token, new repo) → 404 status
+gh.noRepo = true;
+const E = await device("E", { ...cfg, repo: "me/nope" });
+check("inaccessible repo shows '⚠ repo not found'", await poll(async () => (await E.textContent("#sync")) === "⚠ repo not found"), await E.textContent("#sync"));
+await E.context().close();
 
 check("no uncaught JS errors", errors.length === 0, errors.join(" | "));
 

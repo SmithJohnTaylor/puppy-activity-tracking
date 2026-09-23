@@ -144,8 +144,9 @@
     <input id="sRepo" placeholder="owner/repo">
     <label for="sToken">GitHub token</label>
     <input id="sToken" type="password" autocomplete="off" placeholder="github_pat_…">
-    <div class="hint">Fine-grained token, this repo only, <b>Contents: Read and write</b>. Stored only in this browser.
-      Data is saved to <code>events.json</code> on the <code>data</code> branch. Leave blank to keep data on this device only.</div>
+    <div class="hint">Use a separate <b>private</b> repo, not the app's repo. Fine-grained token, that repo only,
+      <b>Contents: Read and write</b>. Stored only in this browser. Data is saved to <code>events.json</code> on the
+      <code>data</code> branch (created if missing). Leave blank to keep data on this device only.</div>
     <div class="row">
       <button type="button" id="sExport">Export JSON</button>
       <button value="cancel" formnovalidate>Cancel</button>
@@ -177,7 +178,7 @@ let cfg = load(LS.cfg, {});
 if (!cfg.repo && location.hostname.endsWith(".github.io")) {
   const owner = location.hostname.split(".")[0];
   const repo = location.pathname.split("/").filter(Boolean)[0] || `${owner}.github.io`;
-  cfg.repo = `${owner}/${repo}`;
+  cfg.repo = `${owner}/${repo}-data`; // separate private repo, so the token can't change the app
 }
 let filter = "all";
 const save = () => { try { localStorage.setItem(LS.data, JSON.stringify(data)); } catch {} };
@@ -245,7 +246,7 @@ function toLocalInput(ts) {
   const d = new Date(ts); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return d.toISOString().slice(0, 16);
 }
-const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // ---------- render ----------
 const $ = id => document.getElementById(id);
@@ -284,10 +285,10 @@ function render() {
   events.forEach((e, i) => {
     const d = fmtDay(e.ts);
     if (d !== day) { if (day) html += "</ul>"; html += `<div class="day">${d}</div><ul class="tl">`; day = d; }
-    const a = ACT[e.type] || { emoji: "❓", name: e.type };
+    const a = Object.hasOwn(ACT, e.type) ? ACT[e.type] : { emoji: "❓", name: esc(e.type) }; // synced data is untrusted
     const prev = events[i + 1];
     const gap = filter !== "all" && prev ? `<span class="gap">+${dur(e.ts - prev.ts)}</span>` : "";
-    html += `<li data-id="${e.id}"><span class="t">${fmtTime(e.ts)}</span>
+    html += `<li data-id="${esc(e.id)}"><span class="t">${fmtTime(e.ts)}</span>
       <span>${a.emoji} ${a.name}${e.accident ? ` <span class="acc">🚨 accident</span>` : ""}${e.note ? ` <span class="n">— ${esc(e.note)}</span>` : ""}</span>${gap}</li>`;
   });
   $("timeline").innerHTML = html + "</ul>";
@@ -424,9 +425,20 @@ async function gh(path, opts = {}) {
   return missingOk ? null : r.json();
 }
 
+// a new data repo may not have the data branch yet: branch it off the default branch
+async function ensureBranch() {
+  if (await gh(`/branches/${DATA_BRANCH}`)) return;
+  const repo = await gh("");
+  if (!repo) throw Object.assign(new Error("repo not found"), { status: 404 });
+  const head = await gh(`/git/ref/heads/${repo.default_branch}`).catch(err => { if (err.status !== 409) throw err; });
+  if (!head) throw Object.assign(new Error("repo has no commits"), { status: "empty" });
+  await gh("/git/refs", { method: "POST", body: JSON.stringify({ ref: `refs/heads/${DATA_BRANCH}`, sha: head.object.sha }) })
+    .catch(err => { if (err.status !== 422) throw err; }); // 422: another device just created it
+}
+
 async function pull() {
   const f = await gh(`/contents/${DATA_PATH}?ref=${DATA_BRANCH}`);
-  if (!f) return { sha: null, remote: { events: [], deleted: [] } };
+  if (!f) { await ensureBranch(); return { sha: null, remote: { events: [], deleted: [] } }; }
   return { sha: f.sha, remote: JSON.parse(b64dec(f.content)) };
 }
 
@@ -438,23 +450,26 @@ async function sync() {
   if (syncing) { pushTimer = setTimeout(sync, 1500); return; }
   syncing = true; setStatus("syncing…");
   try {
-    for (let attempt = 0; attempt < 3; attempt++) {
+    let done = false;
+    for (let attempt = 0; attempt < 3 && !done; attempt++) {
       const { sha, remote } = await pull();
       const merged = merge(data, remote);
       const changed = JSON.stringify(merged) !== JSON.stringify(merge(remote, { events: [], deleted: [] }));
       data = merged; save(); render();
-      if (!changed) { dirty = false; break; }
+      if (!changed) { done = true; break; }
       try {
         await gh(`/contents/${DATA_PATH}`, { method: "PUT", body: JSON.stringify({
           message: `log: ${new Date().toISOString()}`, branch: DATA_BRANCH,
           content: b64enc(JSON.stringify(merged, null, 1)), ...(sha ? { sha } : {}),
         }) });
-        dirty = false; break;
+        done = true;
       } catch (err) { if (err.status !== 409 && err.status !== 422) throw err; } // stale sha → retry
     }
-    setStatus("✓ synced");
+    if (!done) throw Object.assign(new Error("still conflicting after 3 tries"), { status: 409 }); // retried on next sync
+    dirty = false; setStatus("✓ synced");
   } catch (err) {
-    console.error(err); setStatus(err.status === 401 ? "⚠ bad token" : "⚠ offline");
+    console.error(err);
+    setStatus({ 401: "⚠ bad token", 404: "⚠ repo not found", 409: "⚠ conflict", empty: "⚠ repo empty" }[err.status] || "⚠ offline");
   } finally { syncing = false; }
 }
 
