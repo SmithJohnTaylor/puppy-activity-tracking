@@ -32,6 +32,10 @@
     text-align: left; display: flex; flex-direction: column; gap: 2px; min-height: 96px;
     border-left: 5px solid var(--line); transition: transform .08s; }
   .act:active { transform: scale(.97); }
+  .act { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+  .h2row { display: flex; align-items: baseline; justify-content: space-between; }
+  .link { background: none; border: 0; color: var(--accent); font-weight: 600; font-size: 14px; padding: 4px 0; }
+  .quick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .act .emoji { font-size: 28px; }
   .act .name { font-weight: 600; }
   .act .ago { font-size: 13px; color: var(--muted); }
@@ -80,10 +84,10 @@
     <div><span id="sync"></span><button class="icon-btn" id="settingsBtn" aria-label="Settings">⚙️</button></div>
   </header>
 
-  <h2>Tap to log</h2>
+  <h2>Tap to log <span style="text-transform:none;letter-spacing:0">· long-press to log earlier</span></h2>
   <div class="grid" id="grid"></div>
 
-  <h2>Timeline</h2>
+  <div class="h2row"><h2>Timeline</h2><button class="link" id="addPast">＋ Log earlier</button></div>
   <div class="filters" id="filters"></div>
   <div id="timeline"></div>
 </main>
@@ -92,11 +96,18 @@
 
 <dialog id="editDlg">
   <form method="dialog" id="editForm">
-    <h3>Edit entry</h3>
+    <h3 id="eTitle">Edit entry</h3>
     <label for="eType">Activity</label>
     <select id="eType"></select>
     <label for="eTime">When</label>
     <input type="datetime-local" id="eTime" required>
+    <div class="quick" id="eQuick">
+      <button type="button" class="chip" data-min="0">Now</button>
+      <button type="button" class="chip" data-min="15">15m ago</button>
+      <button type="button" class="chip" data-min="30">30m ago</button>
+      <button type="button" class="chip" data-min="60">1h ago</button>
+      <button type="button" class="chip" data-min="120">2h ago</button>
+    </div>
     <label for="eNote">Note</label>
     <input id="eNote" placeholder="optional">
     <div class="row">
@@ -166,8 +177,8 @@ function merge(a, b) {
   return { events: [...byId.values()].sort((x, y) => y.ts - x.ts), deleted };
 }
 
-function addEvent(type, ts = Date.now()) {
-  const e = { id: crypto.randomUUID(), type, ts, note: "", updated: Date.now() };
+function addEvent(type, ts = Date.now(), note = "") {
+  const e = { id: crypto.randomUUID(), type, ts, note, updated: Date.now() };
   data.events.unshift(e);
   data.events.sort((x, y) => y.ts - x.ts);
   commit();
@@ -269,8 +280,23 @@ function toast(msg, ev) {
   toastTimer = setTimeout(() => $("toast").style.display = "none", 5000);
 }
 
+// long-press a card → "log earlier" with that activity preselected
+let pressTimer, pressStart, longPressed = false;
+const cancelPress = () => clearTimeout(pressTimer);
+$("grid").addEventListener("pointerdown", ev => {
+  const b = ev.target.closest(".act"); if (!b) return;
+  longPressed = false; pressStart = [ev.clientX, ev.clientY];
+  pressTimer = setTimeout(() => { longPressed = true; navigator.vibrate?.(15); openNew(b.dataset.type); }, 500);
+});
+$("grid").addEventListener("pointermove", ev => {
+  if (pressStart && Math.hypot(ev.clientX - pressStart[0], ev.clientY - pressStart[1]) > 10) cancelPress();
+});
+["pointerup", "pointercancel", "pointerleave"].forEach(t => $("grid").addEventListener(t, cancelPress));
+$("grid").addEventListener("contextmenu", ev => { if (ev.target.closest(".act")) ev.preventDefault(); });
+
 $("grid").addEventListener("click", ev => {
   const b = ev.target.closest(".act"); if (!b) return;
+  if (longPressed) { longPressed = false; return; }
   const a = ACT[b.dataset.type];
   const e = addEvent(a.id);
   navigator.vibrate?.(30);
@@ -290,20 +316,40 @@ $("timeline").addEventListener("click", ev => {
 });
 
 $("eType").innerHTML = ACTIVITIES.map(a => `<option value="${a.id}">${a.emoji} ${a.name}</option>`).join("");
-let editing = null;
+let editing = null; // event id, or "new" when logging a past entry
+function showEntryDlg(title, type, ts, note, canDelete) {
+  $("eTitle").textContent = title;
+  $("eType").value = type; $("eTime").value = toLocalInput(ts); $("eNote").value = note;
+  $("eTime").max = toLocalInput(Date.now() + 60000);
+  $("eDelete").style.display = canDelete ? "" : "none";
+  $("editDlg").returnValue = "";
+  $("editDlg").showModal();
+}
 function openEdit(id) {
   const e = data.events.find(x => x.id === id); if (!e) return;
   editing = id;
-  $("eType").value = e.type; $("eTime").value = toLocalInput(e.ts); $("eNote").value = e.note || "";
-  $("editDlg").showModal();
+  showEntryDlg("Edit entry", e.type, e.ts, e.note || "", true);
 }
+function openNew(type = filter !== "all" ? filter : "pee") {
+  editing = "new";
+  showEntryDlg("Log earlier", type, Date.now() - 15 * 60000, "", false);
+}
+$("addPast").onclick = () => openNew();
+$("eQuick").addEventListener("click", ev => {
+  const c = ev.target.closest("[data-min]"); if (!c) return;
+  $("eTime").value = toLocalInput(Date.now() - c.dataset.min * 60000);
+});
 $("editDlg").addEventListener("close", () => {
   if ($("editDlg").returnValue === "save" && editing) {
-    updateEvent(editing, { type: $("eType").value, ts: new Date($("eTime").value).getTime(), note: $("eNote").value.trim() });
+    const type = $("eType").value, ts = new Date($("eTime").value).getTime(), note = $("eNote").value.trim();
+    if (editing === "new") {
+      const e = addEvent(type, ts, note);
+      toast(`${ACT[type].emoji} ${ACT[type].name} logged at ${fmtTime(ts)}`, e);
+    } else updateEvent(editing, { type, ts, note });
   }
   editing = null;
 });
-$("eDelete").onclick = () => { if (editing) deleteEvent(editing); editing = null; $("editDlg").close("delete"); };
+$("eDelete").onclick = () => { if (editing && editing !== "new") deleteEvent(editing); editing = null; $("editDlg").close("delete"); };
 
 $("settingsBtn").onclick = () => {
   $("sName").value = cfg.name || ""; $("sRepo").value = cfg.repo || ""; $("sToken").value = cfg.token || "";
