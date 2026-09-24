@@ -71,11 +71,11 @@ package.json      Dev-only: Playwright + `npm test`
 README.md
 ```
 
-Branches:
-- **`main`**: app code. GitHub Pages serves the repo root of `main`.
-- **`data`**: the old home of `events.json`, from before the data moved to the private `-data` repo. Never merge it into `main`.
+This repo has one branch, **`main`**: app code. GitHub Pages serves the repo root of `main`.
 
-The private data repo keeps `events.json` on its own `data` branch.
+Synced data lives in a separate private repo (`<this repo>-data`), in `events.json` on its `data` branch. Commits
+there don't trigger a Pages rebuild. This repo used to have its own `data` branch for that file; it was deleted after
+the move.
 
 ### Data model
 
