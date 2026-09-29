@@ -77,7 +77,7 @@ const settle = p => p.waitForTimeout(1200).then(() => synced(p));
 // ================= local-only mode =================
 {
   const p = await device("local");
-  check("renders 9 activity cards", await p.locator(".act").count() === 9);
+  check("renders 10 activity cards", await p.locator(".act").count() === 10);
   check("empty timeline message", await p.locator(".empty").isVisible());
   check("status says local only", (await p.textContent("#sync")) === "local only");
   const noHScroll = await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
@@ -286,6 +286,113 @@ const settle = p => p.waitForTimeout(1200).then(() => synced(p));
   check("legacy accident editable (type kept)", (await p.inputValue("#eType")) === "accident");
   await p.click('#editDlg button[value="cancel"]');
   await p.tap('.chip[data-filter="all"]');
+
+  // ---- kennel: tap in, tap out, time spent in ----
+  const K = '.act[data-type="kennel"]', kRow = () => p.locator(".tl li", { hasText: "Kennel" });
+  const localInput = ms => { const d = new Date(ms); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+  check("kennel card starts 'never'", (await p.textContent(`${K} .ago`)) === "never");
+  await p.tap(K);
+  check("kennel tap: card says In kennel", await poll(async () => (await p.textContent(`${K} .name`)) === "In kennel"));
+  check("kennel tap: card shows time in + since", (await p.textContent(`${K} .ago`)).startsWith("just now · since"));
+  check("kennel tap: card colored fresh", await p.locator(`${K}.in.fresh`).count() === 1);
+  check("kennel tap: toast says into kennel", (await p.textContent("#toastMsg")).includes("Into kennel"));
+  check("kennel tap: timeline says still in", (await kRow().count()) === 1 && (await kRow().textContent()).includes("still in"));
+  await p.screenshot({ path: OUT + "9-kennel-in.png", fullPage: true });
+
+  // 1h in → getting long, 2h in → overdue
+  await kRow().tap();
+  check("kennel edit shows Out field, blank", await p.locator("#eEnd").isVisible() && (await p.inputValue("#eEnd")) === "");
+  await p.click('#eQuick [data-min="60"]');
+  await p.click('#editDlg button[value="save"]');
+  check("kennel in 1h shows mid (yellow)", await poll(async () => await p.locator(`${K}.in.mid`).count() === 1));
+  check("kennel card shows 1h in", /^1h [01]m · since/.test(await p.textContent(`${K} .ago`)), await p.textContent(`${K} .ago`)); // input drops seconds
+  await kRow().tap();
+  await p.click('#eQuick [data-min="120"]');
+  await p.click('#editDlg button[value="save"]');
+  check("kennel in 2h shows stale (red)", await poll(async () => await p.locator(`${K}.in.stale`).count() === 1));
+
+  // second tap lets the puppy out, doesn't add an entry
+  const k0 = await cnt();
+  await p.tap(K);
+  check("kennel out: no new entry", await poll(async () => (await p.textContent(`${K} .name`)) === "Kennel") && await cnt() === k0);
+  check("kennel out: toast shows time spent", /Out of kennel after 2h [01]m/.test(await p.textContent("#toastMsg")));
+  check("kennel out: card uncolored, 'out just now'", (await p.textContent(`${K} .ago`)).startsWith("out just now") && await p.locator(`${K}.in`).count() === 0);
+  check("kennel out: timeline shows duration", /2h [01]m, out/.test(await kRow().textContent()));
+  await p.tap("#toastUndo");
+  check("kennel out undo: back in, entry kept", await poll(async () => (await p.textContent(`${K} .name`)) === "In kennel") && await cnt() === k0);
+  await p.tap(K);
+  await poll(async () => (await p.textContent(`${K} .name`)) === "Kennel");
+
+  // edit: out before in is rejected; valid out time updates duration
+  await kRow().tap();
+  const kIn = new Date(await p.inputValue("#eTime")).getTime();
+  await p.fill("#eEnd", localInput(kIn - 30 * 60000));
+  await p.click('#editDlg button[value="save"]');
+  await p.waitForTimeout(200);
+  check("kennel out before in blocked", await p.locator("#editDlg").isVisible());
+  await p.fill("#eEnd", localInput(kIn + 45 * 60000));
+  await p.click('#editDlg button[value="save"]');
+  check("kennel edited out time → 45m", await poll(async () => (await kRow().textContent()).includes("45m, out")));
+
+  // log earlier: a whole stay after the fact
+  await p.tap("#addPast");
+  check("Out field hidden for non-kennel", !(await p.locator("#eEndRow").isVisible()));
+  await p.selectOption("#eType", "kennel");
+  check("Out field shown for kennel", await p.locator("#eEndRow").isVisible());
+  await p.click('#eQuick [data-min="60"]');
+  await p.click("#eEndNow");
+  await p.click('#editDlg button[value="save"]');
+  check("past kennel stay saved with duration", await poll(async () => (await kRow().allTextContents()).some(t => /1h [01]m, out/.test(t))));
+  check("past stay makes card 'out just now'", (await p.textContent(`${K} .ago`)).startsWith("out just now"));
+
+  // clearing the out time reopens the stay
+  await kRow().first().tap();
+  await p.click("#eEndClear");
+  await p.click('#editDlg button[value="save"]');
+  check("clearing out time → In kennel again", await poll(async () => (await p.textContent(`${K} .name`)) === "In kennel"));
+  await p.tap('.chip[data-filter="kennel"]');
+  check("kennel filter shows both stays", await cnt() === 2);
+  await p.tap('.chip[data-filter="all"]');
+
+  // ---- nap: same stay behavior, its own wording ----
+  const N = '.act[data-type="sleep"]', nRow = () => p.locator(".tl li", { hasText: "Nap" });
+  // a nap logged before naps had an end: stays a plain entry, not "napping now"
+  await p.evaluate(() => {
+    const d = JSON.parse(localStorage.getItem("puppylog.data"));
+    d.events.push({ id: "oldnap", type: "sleep", ts: Date.now() - 3 * 36e5, note: "", updated: 1 });
+    localStorage.setItem("puppylog.data", JSON.stringify(d));
+  });
+  await p.reload();
+  check("old nap without end: card not Napping, shows time since", (await p.textContent(`${N} .name`)) === "Nap"
+    && (await p.textContent(`${N} .ago`)).startsWith("3h 0m ago") && await p.locator(`${N}.in`).count() === 0);
+  check("old nap without end: no stay text in timeline", await p.locator('.tl li[data-id="oldnap"] .stay').count() === 0);
+  await p.locator('.tl li[data-id="oldnap"]').tap();
+  await p.fill("#eNote", "before naps had an end");
+  await p.click('#editDlg button[value="save"]');
+  check("editing old nap keeps it ended", await poll(async () => (await p.locator('.tl li[data-id="oldnap"]').textContent()).includes("before naps"))
+    && (await p.textContent(`${N} .name`)) === "Nap");
+
+  await p.tap(N);
+  check("nap tap: card says Napping", await poll(async () => (await p.textContent(`${N} .name`)) === "Napping"));
+  check("nap tap: toast says nap started", (await p.textContent("#toastMsg")).includes("Nap started at"));
+  check("nap tap: timeline says still asleep", (await nRow().first().textContent()).includes("still asleep"));
+  await nRow().first().tap();
+  check("nap edit: Woke up field + Still asleep button", (await p.textContent("#eEndLabel")).startsWith("Woke up")
+    && (await p.textContent("#eEndClear")) === "Still asleep");
+  await p.click('#eQuick [data-min="60"]');
+  await p.click('#editDlg button[value="save"]');
+  check("nap 1h shows mid (yellow)", await poll(async () => await p.locator(`${N}.in.mid`).count() === 1));
+  await nRow().first().tap();
+  await p.click('#eQuick [data-min="120"]');
+  await p.click('#editDlg button[value="save"]');
+  check("nap 2h shows stale (red)", await poll(async () => await p.locator(`${N}.in.stale`).count() === 1));
+  await p.screenshot({ path: OUT + "10-napping.png", fullPage: true });
+  const n2 = await cnt();
+  await p.tap(N);
+  check("nap tap again: awake, no new entry", await poll(async () => (await p.textContent(`${N} .name`)) === "Nap") && await cnt() === n2);
+  check("nap end: toast says awake after", /Awake after 2h [01]m/.test(await p.textContent("#toastMsg")));
+  check("nap end: card 'woke just now', uncolored", (await p.textContent(`${N} .ago`)).startsWith("woke just now") && await p.locator(`${N}.in`).count() === 0);
+  check("nap end: timeline shows length", /2h [01]m, woke/.test(await nRow().first().textContent()));
   await p.screenshot({ path: OUT + "7-after.png", fullPage: true });
   await p.context().close();
 }
@@ -346,8 +453,8 @@ check("local data kept after sync failure", await B.locator(".tl li").count() ==
 await B.context().unroute("https://api.github.com/**");
 await B.context().setOffline(true);
 await B.tap('.act[data-type="play"]');
-await B.waitForTimeout(1500);
-check("offline: logs locally, status offline", (await B.locator(".tl li", { hasText: "Play" }).count()) === 1 && (await B.textContent("#sync")) === "⚠ offline");
+check("offline: logs locally, status offline", await poll(async () => (await B.locator(".tl li", { hasText: "Play" }).count()) === 1
+  && (await B.textContent("#sync")) === "⚠ offline", 5000), await B.textContent("#sync"));
 await B.context().setOffline(false);
 await mockGitHub(B.context());
 await B.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
@@ -358,12 +465,15 @@ check("back online: offline entry pushed", gh.json.events.some(e => e.type === "
 const XSS = `<img src=x onerror="window.__xss=1">`;
 putRemote({ ...gh.json, events: [...gh.json.events,
   { id: `"><img src=x onerror="window.__xss=1">`, type: XSS, ts: Date.now() - 5000, note: 42, updated: 1 },
-  { id: "proto", type: "__proto__", ts: Date.now() - 6000, note: "", updated: 1 }] });
+  { id: "proto", type: "__proto__", ts: Date.now() - 6000, note: "", updated: 1 },
+  { id: "badend", type: "kennel", ts: Date.now() - 7000, end: XSS, note: "", updated: 1 }] });
 await B.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
 await settle(B);
 await B.waitForTimeout(300);
 check("remote markup in type/id not executed", !(await B.evaluate(() => window.__xss)) && await B.locator("#timeline img").count() === 0);
 check("unknown remote type shown as text", await B.locator(".tl li", { hasText: XSS }).count() === 1);
+check("kennel with non-numeric end not treated as ongoing", (await B.textContent('.act[data-type="kennel"] .name')) === "Kennel"
+  && !(await B.textContent('.tl li[data-id="badend"]')).includes("NaN"));
 check("__proto__ type rendered as unknown", (await B.locator('.tl li[data-id="proto"]').textContent()).includes("❓ __proto__"));
 await B.locator(".tl li", { hasText: XSS }).tap();
 check("escaped id still opens its entry", await B.locator("#editDlg").isVisible() && (await B.inputValue("#eNote")) === "42");

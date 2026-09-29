@@ -42,6 +42,7 @@
   .act.fresh { border-left-color: var(--ok); }
   .act.mid { border-left-color: var(--warn); }
   .act.stale { border-left-color: var(--bad); }
+  .act.in { background: color-mix(in srgb, var(--accent) 10%, var(--card)); }
   .act.flash { background: color-mix(in srgb, var(--ok) 18%, var(--card)); }
 
   .filters { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
@@ -55,7 +56,7 @@
   .tl li::before { content: ""; position: absolute; left: -20px; top: 14px; width: 10px; height: 10px;
     border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
   .tl .t { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 14px; min-width: 64px; }
-  .tl .n { color: var(--muted); font-size: 14px; }
+  .tl .n, .tl .stay { color: var(--muted); font-size: 14px; }
   .tl .gap { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
   .empty { color: var(--muted); padding: 12px 0; }
 
@@ -113,6 +114,11 @@
       <button type="button" class="chip" data-min="60">1h ago</button>
       <button type="button" class="chip" data-min="120">2h ago</button>
     </div>
+    <div id="eEndRow">
+      <label for="eEnd" id="eEndLabel"></label>
+      <input type="datetime-local" id="eEnd">
+      <div class="quick"><button type="button" class="chip" id="eEndNow">Now</button><button type="button" class="chip" id="eEndClear"></button></div>
+    </div>
     <label for="eNote">Note</label>
     <input id="eNote" placeholder="optional">
     <div class="row">
@@ -161,10 +167,13 @@ const ACTIVITIES = [
   { id: "poop",     name: "Poop",     emoji: "💩", warnMin: 240, staleMin: 480 },
   { id: "eat",      name: "Eat",      emoji: "🍖", warnMin: 300, staleMin: 480 },
   { id: "drink",    name: "Drink",    emoji: "💧", warnMin: 120, staleMin: 240 },
-  { id: "sleep",    name: "Nap",      emoji: "😴", warnMin: 180, staleMin: 360 },
+  { id: "sleep",    name: "Nap",      emoji: "😴", warnMin: 60,  staleMin: 120,
+    stay: { now: "Napping", start: "Nap started", stop: "Awake", out: "woke", still: "still asleep", endLabel: "Woke up" } },
   { id: "walk",     name: "Walk",     emoji: "🦮", warnMin: 240, staleMin: 480 },
   { id: "play",     name: "Play",     emoji: "🎾", warnMin: 240, staleMin: 480 },
   { id: "train",    name: "Training", emoji: "🎓", warnMin: 720, staleMin: 1440 },
+  { id: "kennel",   name: "Kennel",   emoji: "🏠", warnMin: 60,  staleMin: 120,
+    stay: { now: "In kennel", start: "Into kennel", stop: "Out of kennel", out: "out", still: "still in", endLabel: "Out of kennel" } },
   { id: "accident", name: "Accident", emoji: "🚨", warnMin: null, staleMin: null },
 ];
 const ACT = Object.fromEntries(ACTIVITIES.map(a => [a.id, a]));
@@ -198,6 +207,13 @@ function merge(a, b) {
 // accidents are pee/poop entries flagged `accident: true` (type "accident" = legacy entries)
 const isAccident = e => e.accident || e.type === "accident";
 const canBeAccident = type => type === "pee" || type === "poop";
+
+// activities with `stay` (nap, kennel) last a while: `ts` = start, `end` = finish, `end: null` = still going.
+// Their warnMin/staleMin limit how long the current stay has lasted, not the time since.
+// No `end` at all = logged before naps had an end: shown like any other entry.
+const isOpen = e => e.end === null;
+const endOf = e => Number.isFinite(e.end) ? e.end : null; // synced data is untrusted
+const openStay = type => { const k = data.events.find(e => e.type === type); return k && isOpen(k) ? k : null; };
 
 function addEvent(type, ts = Date.now(), note = "", extra = {}) {
   const e = { id: crypto.randomUUID(), type, ts, note, ...extra, updated: Date.now() };
@@ -262,8 +278,20 @@ function render() {
     if (isAccident(e) && !("accident" in last)) last.accident = e.ts;
   }
 
+  const current = new Map(ACTIVITIES.filter(a => a.stay).map(a => [a.id, data.events.find(e => e.type === a.id)]));
   $("grid").innerHTML = ACTIVITIES.map(a => {
     const t = last[a.id];
+    if (a.stay) {
+      // colored by how long the current stay has lasted; uncolored once it's over
+      const k = current.get(a.id), on = k && isOpen(k), end = k && endOf(k);
+      const min = on ? (now - t) / 60000 : 0;
+      const cls = !on ? "" : min < a.warnMin ? "in fresh" : min < a.staleMin ? "in mid" : "in stale";
+      const info = on ? `${now - t < 60000 ? "just now" : dur(now - t)} · since ${fmtTime(t)}`
+        : end ? `${a.stay.out} ${ago(now - end)} · ${fmtTime(end)}` : t ? `${ago(now - t)} · ${fmtTime(t)}` : "never";
+      return `<button class="act ${cls}" data-type="${a.id}">
+        <span class="emoji">${a.emoji}</span><span class="name">${on ? a.stay.now : a.name}</span>
+        <span class="ago">${info}</span></button>`;
+    }
     let cls = "";
     if (t && a.warnMin) {
       const min = (now - t) / 60000;
@@ -288,16 +316,21 @@ function render() {
     const a = Object.hasOwn(ACT, e.type) ? ACT[e.type] : { emoji: "❓", name: esc(e.type) }; // synced data is untrusted
     const prev = events[i + 1];
     const gap = filter !== "all" && prev ? `<span class="gap">+${dur(e.ts - prev.ts)}</span>` : "";
+    const end = a.stay && endOf(e);
+    const stay = !a.stay || !(end || isOpen(e)) ? "" : ` <span class="stay">· ${end ? `${dur(end - e.ts)}, ${a.stay.out} ${fmtTime(end)}`
+      : current.get(e.type) === e ? `${a.stay.still}${now - e.ts < 60000 ? "" : ` (${dur(now - e.ts)})`}` : "no end time"}</span>`;
     html += `<li data-id="${esc(e.id)}"><span class="t">${fmtTime(e.ts)}</span>
-      <span>${a.emoji} ${a.name}${e.accident ? ` <span class="acc">🚨 accident</span>` : ""}${e.note ? ` <span class="n">— ${esc(e.note)}</span>` : ""}</span>${gap}</li>`;
+      <span>${a.emoji} ${a.name}${stay}${e.accident ? ` <span class="acc">🚨 accident</span>` : ""}${e.note ? ` <span class="n">— ${esc(e.note)}</span>` : ""}</span>${gap}</li>`;
   });
   $("timeline").innerHTML = html + "</ul>";
 }
 
 // ---------- interactions ----------
-let toastTimer, lastAdded = [];
-function toast(msg, evs) {
+let toastTimer, lastAdded = [], undoFn;
+// Undo deletes the logged events unless `undo` says otherwise
+function toast(msg, evs, undo) {
   lastAdded = [].concat(evs || []);
+  undoFn = undo || (() => lastAdded.forEach(e => deleteEvent(e.id)));
   $("toastMsg").textContent = msg;
   $("toastUndo").style.display = lastAdded.length ? "" : "none";
   $("toastEdit").style.display = lastAdded.length === 1 ? "" : "none";
@@ -325,13 +358,21 @@ $("grid").addEventListener("click", ev => {
   if (longPressed) { longPressed = false; return; }
   const a = ACT[b.dataset.type];
   if (a.id === "accident") { accidentTs = Date.now(); $("accDlg").returnValue = ""; $("accDlg").showModal(); return; }
-  const e = addEvent(a.id);
+  const k = a.stay && openStay(a.id);
+  if (k) { // a stay is going on → this tap ends it
+    const end = Date.now();
+    updateEvent(k.id, { end });
+    navigator.vibrate?.(30);
+    toast(`${a.emoji} ${a.stay.stop} after ${dur(end - k.ts)}`, k, () => updateEvent(k.id, { end: null }));
+    return;
+  }
+  const e = addEvent(a.id, Date.now(), "", a.stay ? { end: null } : {});
   navigator.vibrate?.(30);
-  toast(`${a.emoji} ${a.name} logged at ${fmtTime(e.ts)}`, e);
+  toast(a.stay ? `${a.emoji} ${a.stay.start} at ${fmtTime(e.ts)}` : `${a.emoji} ${a.name} logged at ${fmtTime(e.ts)}`, e);
   const nb = document.querySelector(`.act[data-type="${a.id}"]`);
   nb?.classList.add("flash"); setTimeout(() => nb?.classList.remove("flash"), 400);
 });
-$("toastUndo").onclick = () => { lastAdded.forEach(e => deleteEvent(e.id)); $("toast").style.display = "none"; };
+$("toastUndo").onclick = () => { undoFn(); $("toast").style.display = "none"; };
 $("toastEdit").onclick = () => { if (lastAdded[0]) openEdit(lastAdded[0].id); $("toast").style.display = "none"; };
 
 let accidentTs;
@@ -353,15 +394,25 @@ $("timeline").addEventListener("click", ev => {
 });
 
 let editing = null; // event id, or "new" when logging a past entry
-const syncAccRow = () => { $("eAccRow").style.display = canBeAccident($("eType").value) ? "" : "none"; };
-$("eType").addEventListener("change", syncAccRow);
-function showEntryDlg(title, type, ts, note, canDelete, accident = false) {
+const syncTypeRows = () => {
+  $("eAccRow").style.display = canBeAccident($("eType").value) ? "" : "none";
+  const s = ACT[$("eType").value]?.stay; // value is "" for an unknown synced type
+  $("eEndRow").style.display = s ? "" : "none";
+  if (s) { $("eEndLabel").textContent = `${s.endLabel} (blank = ${s.still})`; $("eEndClear").textContent = s.still[0].toUpperCase() + s.still.slice(1); }
+};
+const syncEndMin = () => { $("eEnd").min = $("eTime").value; }; // a stay can't end before it starts
+$("eType").addEventListener("change", syncTypeRows);
+$("eTime").addEventListener("input", syncEndMin);
+$("eEndNow").onclick = () => { $("eEnd").value = toLocalInput(Date.now()); };
+$("eEndClear").onclick = () => { $("eEnd").value = ""; };
+function showEntryDlg(title, type, ts, note, canDelete, accident = false, end = null) {
   // "accident" is only a choice when editing a legacy accident entry
   $("eType").innerHTML = ACTIVITIES.filter(a => a.id !== "accident" || type === "accident")
     .map(a => `<option value="${a.id}">${a.emoji} ${a.name}</option>`).join("");
   $("eTitle").textContent = title;
-  $("eType").value = type; $("eAcc").checked = accident; syncAccRow(); $("eTime").value = toLocalInput(ts); $("eNote").value = note;
-  $("eTime").max = toLocalInput(Date.now() + 60000);
+  $("eType").value = type; $("eAcc").checked = accident; syncTypeRows(); $("eTime").value = toLocalInput(ts); $("eNote").value = note;
+  $("eEnd").value = end ? toLocalInput(end) : ""; syncEndMin();
+  $("eTime").max = $("eEnd").max = toLocalInput(Date.now() + 60000);
   $("eDelete").style.display = canDelete ? "" : "none";
   $("editDlg").returnValue = "";
   $("editDlg").showModal();
@@ -369,7 +420,7 @@ function showEntryDlg(title, type, ts, note, canDelete, accident = false) {
 function openEdit(id) {
   const e = data.events.find(x => x.id === id); if (!e) return;
   editing = id;
-  showEntryDlg("Edit entry", e.type, e.ts, e.note || "", true, !!e.accident);
+  showEntryDlg("Edit entry", e.type, e.ts, e.note || "", true, !!e.accident, endOf(e));
 }
 function openNew(type = filter !== "all" ? filter : "pee") {
   editing = "new";
@@ -379,16 +430,20 @@ function openNew(type = filter !== "all" ? filter : "pee") {
 $("addPast").onclick = () => openNew();
 $("eQuick").addEventListener("click", ev => {
   const c = ev.target.closest("[data-min]"); if (!c) return;
-  $("eTime").value = toLocalInput(Date.now() - c.dataset.min * 60000);
+  $("eTime").value = toLocalInput(Date.now() - c.dataset.min * 60000); syncEndMin();
 });
 $("editDlg").addEventListener("close", () => {
   if ($("editDlg").returnValue === "save" && editing) {
     const type = $("eType").value, ts = new Date($("eTime").value).getTime(), note = $("eNote").value.trim();
     const accident = canBeAccident(type) && $("eAcc").checked;
+    // blank end = still going, except on an old nap that never had an end (keep it that way)
+    const orig = editing !== "new" && data.events.find(x => x.id === editing);
+    const end = !ACT[type]?.stay ? undefined : $("eEnd").value ? new Date($("eEnd").value).getTime()
+      : orig && orig.type === type && !isOpen(orig) && !endOf(orig) ? undefined : null;
     if (editing === "new") {
-      const e = addEvent(type, ts, note, accident ? { accident } : {});
+      const e = addEvent(type, ts, note, { ...(accident ? { accident } : {}), ...(end !== undefined ? { end } : {}) });
       toast(`${accident ? "🚨" : ACT[type].emoji} ${ACT[type].name}${accident ? " accident" : ""} logged at ${fmtTime(ts)}`, e);
-    } else updateEvent(editing, { type, ts, note, accident });
+    } else updateEvent(editing, { type, ts, note, accident, end });
   }
   editing = null;
 });
@@ -475,7 +530,7 @@ async function sync() {
 
 render();
 sync();
-setInterval(render, 30000);
+setInterval(render, 5 * 60000);
 setInterval(() => { if (!document.hidden) sync(); }, 60000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { render(); sync(); } });
 </script>

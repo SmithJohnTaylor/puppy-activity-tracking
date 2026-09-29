@@ -1,7 +1,8 @@
 # 🐶 Puppy Log
 
-A small web app for tracking a puppy's day: pee, poop, eating, drinking, naps, walks, play, training and accidents.
-It shows how long it has been since each activity, and a timeline of everything logged.
+A small web app for tracking a puppy's day: pee, poop, eating, drinking, naps, walks, play, training, kennel time and
+accidents. It shows how long it has been since each activity, how long the current nap or kennel stay has lasted, and a timeline
+of everything logged.
 
 **Live:** https://smithjohntaylor.github.io/puppy-activity-tracking/
 
@@ -16,15 +17,17 @@ and syncs data across devices by reading and writing a JSON file in a separate p
 |---|---|
 | Log something now | Tap its card. A toast offers **Undo** and **Edit**. |
 | Log something you forgot | Tap **＋ Log earlier** above the timeline, or long-press a card (that activity is preselected). Quick buttons: Now, 15m, 30m, 1h, 2h ago. Future times are rejected. |
+| Nap / kennel start and end | Tap **Nap** when the puppy falls asleep, or **Kennel** when it goes in. The card changes to **Napping** / **In kennel** and shows how long so far. Tap it again when the puppy wakes up or comes out; the toast shows how long it lasted, and **Undo** makes it ongoing again. |
 | Log an accident | Tap **Accident**, then choose 💦 Pee, 💩 Poop or Both. This saves a pee/poop entry marked as an accident, so the Pee/Poop cards update too. |
-| Edit or delete an entry | Tap it in the timeline. You can change the activity, time, note and accident checkbox. |
+| Edit or delete an entry | Tap it in the timeline. You can change the activity, time, note and accident checkbox. Nap and kennel entries also have a **Woke up** / **Out of kennel** time (blank = still going). |
 | Filter the timeline | Tap a chip. When filtered to one activity, each entry shows the time since the previous one (e.g. `+2h 15m`). |
 | Set the puppy's name / turn on sync | ⚙️ Settings |
 | Back up data | ⚙️ Settings → **Export JSON** |
 
 Card colors show how long ago the activity last happened: green = recent, yellow = getting long, red = overdue.
 The limits are `warnMin` / `staleMin` in the `ACTIVITIES` array at the top of the script. Accident has no limits,
-so its card is never colored.
+so its card is never colored. The Nap and Kennel cards are different: while a nap or kennel stay is going on, the color
+shows how long it has lasted (yellow after 1h, red after 2h). Once it's over, the card isn't colored.
 
 Tip: on iPhone, Safari → Share → **Add to Home Screen** makes it open like an app.
 
@@ -84,17 +87,24 @@ Stored in localStorage under `puppylog.data`, and synced to `events.json` in the
 ```json
 {
   "events": [
-    { "id": "uuid", "type": "pee", "ts": 1758631200000, "note": "", "accident": true, "updated": 1758631200000 }
+    { "id": "uuid", "type": "pee", "ts": 1758631200000, "note": "", "accident": true, "updated": 1758631200000 },
+    { "id": "uuid", "type": "kennel", "ts": 1758631200000, "end": 1758638400000, "note": "", "updated": 1758638400000 }
   ],
   "deleted": ["uuid-of-a-deleted-event"]
 }
 ```
 
-- `type` is one of the ids in `ACTIVITIES`: `pee`, `poop`, `eat`, `drink`, `sleep` (shown as "Nap"), `walk`, `play`, `train`, `accident`.
+- `type` is one of the ids in `ACTIVITIES`: `pee`, `poop`, `eat`, `drink`, `sleep` (shown as "Nap"), `walk`, `play`, `train`, `kennel`, `accident`.
 - `ts` is when the activity happened; `updated` is when the entry was last changed. Both are epoch ms.
 - **Accidents** are `pee`/`poop` entries with `accident: true`, not their own entries. `isAccident(e)` also treats
   `type: "accident"` as an accident. That covers entries logged before this change, which were never converted
   because there's no way to know whether they were pee or poop. When editing, "Accident" is offered as a type only for those older entries.
+- **Stays** (naps and kennel, the activities with a `stay` field) are a single entry: `ts` is when it started, `end`
+  is when it ended, and `end: null` means it's still going. Ending it edits the entry (and bumps `updated`) instead of
+  adding a new one, so it syncs like any other edit. Only the newest entry of each type counts as ongoing. An older
+  entry with `end: null` shows "no end time". An entry with no `end` field at all is a nap logged before naps had an
+  end: it's shown like any other entry, and editing it keeps it that way unless you set an end time. `endOf(e)` ignores
+  a non-numeric `end` from synced data.
 - `deleted` is a list of ids for deleted entries. It stays in the file so that a delete on one device also removes the entry from other devices.
 
 Settings are stored in localStorage under `puppylog.cfg`: `{ name, repo, token }`. On `*.github.io`, `repo` defaults to
@@ -121,10 +131,11 @@ regains focus. Failures never lose local data.
 | State and persistence | `data`, `cfg`, `save()`, `saveCfg()`, `commit()` (save + re-render + schedule sync) |
 | Mutations | `addEvent(type, ts, note, extra)`, `updateEvent(id, patch)`, `deleteEvent(id)` |
 | Accidents | `isAccident()`, `canBeAccident()`, `#accDlg` chooser, `accidentTs` |
+| Stays (nap, kennel) | `stay` field in `ACTIVITIES` (wording), `isOpen()`, `endOf()`, `openStay(type)`, `a.stay` branches in the `#grid` click handler and `render()`, `#eEndRow` in the entry dialog |
 | Rendering | `render()`: cards, filter chips, timeline grouped by day |
 | Entry dialog | `showEntryDlg()`, `openEdit(id)`, `openNew(type)`; `editing` is an event id or `"new"` |
 | Long-press | `pointerdown` timer on `#grid` (500ms); `longPressed` stops the tap from also logging |
-| Toast | `toast(msg, evs)`: Undo works on several events, Edit only when there's one |
+| Toast | `toast(msg, evs, undo)`: Undo deletes `evs` (or runs `undo` if given), Edit only when there's one event |
 | GitHub sync | `gh()`, `ensureBranch()`, `pull()`, `sync()`, `schedulePush()`, `merge()` |
 
 The page supports dark mode (`prefers-color-scheme`) and uses safe-area insets. It is built for a phone at 375px wide.
@@ -133,6 +144,7 @@ The page supports dark mode (`prefers-color-scheme`) and uses safe-area insets. 
 
 Add an entry to `ACTIVITIES` with `id`, `name`, `emoji`, `warnMin`, `staleMin`. No other change is needed:
 cards, filters and the edit dialog are all built from that array. Never rename an existing `id`, because entries already saved use it.
+For something with a start and an end (like a nap), also add a `stay` object with its wording; copy the Nap one.
 
 ---
 
@@ -148,10 +160,10 @@ npm test
 
 `tests/e2e.mjs` serves `index.html` from a local server and replaces the GitHub API with an in-memory fake
 (it can simulate 404, 409 conflicts, 401, offline, a missing `data` branch and an empty repo). It then tests the app in two separate browser contexts
-acting as two devices. It covers logging, undo, editing, log earlier, long-press, accidents, filters, persistence,
+acting as two devices. It covers logging, undo, editing, log earlier, long-press, accidents, nap and kennel stays, filters, persistence,
 dark mode, sync between two devices, conflict retry, deletes syncing, bad token, offline recovery, escaping of
 untrusted synced data, creating the `data` branch in a new repo, and the error statuses.
-Screenshots are written to `tests/screenshots/` (gitignored). The last run: **91 passed, 0 failed**.
+Screenshots are written to `tests/screenshots/` (gitignored). The last run: **128 passed, 0 failed**.
 
 To view the app locally: `python3 -m http.server` in the repo root, then open http://localhost:8000.
 
@@ -181,6 +193,8 @@ non-interactive shells. If `node: command not found` or `_load_nvm` errors appea
    toast width fix and no tap highlight on buttons.
 4. **Security**: synced data moved to a separate private repo, so the token can't change the app. Synced values are
    escaped before rendering. The app creates the `data` branch if it's missing. Clearer sync error statuses.
+5. **Kennel and naps**: tap to start, tap again to end. The card shows how long the current stay has lasted, and the
+   timeline shows how long each one lasted. Naps logged before this have no end and are shown as before.
 
 Ideas not built yet: GitHub Action to run tests on push, stats (e.g. average time between pees, accidents per day),
 a service worker for offline loading, several dogs.
